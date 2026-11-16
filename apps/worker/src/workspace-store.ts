@@ -172,10 +172,20 @@ export interface SavedMemberfulKeys {
   sealedSecrets: string;
 }
 
-/** A Realtime SFU app's keys as the account keeps them: its ID, and its secret sealed (`seal`). */
+/**
+ * A Realtime SFU app's keys as the account keeps them: its ID, and its secret sealed (`seal`), and with
+ * them the TURN key huddles' relay goes by, or null while they have no relay.
+ */
 export interface SavedHuddles {
   appId: string;
   sealedAppSecret: string;
+  relay: SavedRelay | null;
+}
+
+/** A TURN key as the account keeps it: its ID, and its API token sealed (`seal`). */
+export interface SavedRelay {
+  keyId: string;
+  sealedApiToken: string;
 }
 
 /**
@@ -1192,14 +1202,29 @@ function memberfulKeysIn(settings: Record<string, unknown> | null): SavedMemberf
 
 /**
  * The Realtime SFU app huddles run through, which the account's settings keep as `huddles`,
- * `{ app_id, app_secret }`, the secret sealed, or null while huddles are off.
+ * `{ app_id, app_secret }`, the secret sealed, or null while huddles are off. The TURN key their relay
+ * goes by is kept with it, as `relay`, so that turning huddles off forgets both.
  */
 function huddlesIn(settings: Record<string, unknown> | null): SavedHuddles | null {
   const kept = settings?.huddles;
   if (typeof kept !== "object" || kept === null) return null;
-  const { app_id: appId, app_secret: sealedAppSecret } = kept as Record<string, unknown>;
-  return typeof appId === "string" && typeof sealedAppSecret === "string" ? { appId, sealedAppSecret } : null;
+  const { app_id: appId, app_secret: sealedAppSecret, relay } = kept as Record<string, unknown>;
+  return typeof appId === "string" && typeof sealedAppSecret === "string" ? { appId, sealedAppSecret, relay: relayIn(relay) } : null;
 }
+
+/** The TURN key huddles' relay goes by, as `huddles` keeps it, `{ key_id, api_token }`, the token sealed, or null without one. */
+function relayIn(kept: unknown): SavedRelay | null {
+  if (typeof kept !== "object" || kept === null) return null;
+  const { key_id: keyId, api_token: sealedApiToken } = kept as Record<string, unknown>;
+  return typeof keyId === "string" && typeof sealedApiToken === "string" ? { keyId, sealedApiToken } : null;
+}
+
+/** `huddles` as the account's settings keep them. */
+const storedHuddles = ({ appId, sealedAppSecret, relay }: SavedHuddles) => ({
+  app_id: appId,
+  app_secret: sealedAppSecret,
+  ...(relay && { relay: { key_id: relay.keyId, api_token: relay.sealedApiToken } }),
+});
 
 /** Whether the account's settings let cameras go on in huddles, which they keep as `huddle_cameras`: unless that's stored as false, as the Cameras switch stores it. */
 const showsHuddleCameras = (settings: Record<string, unknown> | null) => settings?.huddle_cameras !== false;
@@ -1530,6 +1555,14 @@ const KEEP_REPORT_TIME = `UPDATE rooms SET huddle_reported_at = ?2 WHERE id = ?1
 
 /** When the report kept of a room's huddle was made. */
 const HUDDLE_REPORTED_AT = `SELECT huddle_reported_at FROM rooms WHERE id = ?`;
+
+/**
+ * Who of the people a JSON list ?2 names an invitation into room ?1's huddle reaches: those in the room,
+ * active, who hear its @mentions of them or more, since an invitation names them as a mention does.
+ */
+export const HUDDLE_INVITEES = `SELECT memberships.user_id FROM memberships JOIN users ON users.id = memberships.user_id
+  WHERE memberships.room_id = ?1 AND memberships.user_id IN (SELECT value FROM json_each(?2))
+    AND memberships.involvement IN ('everything', 'mentions') AND users.status = ${ACTIVE}`;
 
 /** A room's huddle, as its row keeps it. */
 const HUDDLE = `SELECT huddle_started_at, huddle_user_ids FROM rooms WHERE id = ?`;
@@ -2823,7 +2856,7 @@ export class WorkspaceStore {
       ...(memberfulKeys === undefined
         ? []
         : [statement(SET_MEMBERFUL_KEYS, JSON.stringify(memberfulKeys && { site: memberfulKeys.site, client_id: memberfulKeys.clientId, secrets: memberfulKeys.sealedSecrets }), now)]),
-      ...(huddles === undefined ? [] : [statement(SET_HUDDLES, JSON.stringify(huddles && { app_id: huddles.appId, app_secret: huddles.sealedAppSecret }), now)]),
+      ...(huddles === undefined ? [] : [statement(SET_HUDDLES, JSON.stringify(huddles && storedHuddles(huddles)), now)]),
     ]);
   }
 
@@ -3700,6 +3733,11 @@ export class WorkspaceStore {
     ])) as [Array<{ huddle_reported_at: number }>, unknown[], UserIdRow[], unknown[]];
     if (before && before.huddle_reported_at >= at) return { memberIds: null, outdatedBy: before.huddle_reported_at };
     return { memberIds: changed.length > 0 ? userIdsOf(members) : null, outdatedBy: null };
+  }
+
+  /** Who of `userIds` an invitation into room `roomId`'s huddle reaches: those in the room who hear its @mentions of them or more. */
+  async huddleInvitees(roomId: RoomId, userIds: UserId[]): Promise<UserId[]> {
+    return userIdsOf(await this.db.all<UserIdRow>(HUDDLE_INVITEES, roomId, JSON.stringify(userIds)));
   }
 
   /** The huddle going on in a room, or null when none is. */

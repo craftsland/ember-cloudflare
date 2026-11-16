@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountContext, useAccount } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
-import { showHuddle, type JoinedHuddle } from "@/lib/huddle-store";
+import { showHuddle, showSpeaking, type JoinedHuddle } from "@/lib/huddle-store";
 import { HuddleBar } from "./huddle-bar";
 
 const ada: User = { id: "ada", name: "Ada Lovelace" };
@@ -21,6 +21,8 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   people: [inHuddle(sam), inHuddle(ada)],
   muted: false,
   microphone: true,
+  microphoneId: "",
+  speakerId: "",
   camera: null,
   watched: new Map(),
   screen: null,
@@ -34,7 +36,7 @@ const SCREEN = {} as MediaStream;
 
 /** The bar of the huddle this tab is in, with what the huddle's controls were asked. */
 function renderBar(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn() };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<HuddleBar huddle={joined} room={room} meId="ada" />);
@@ -61,6 +63,7 @@ const state = () => bar().querySelector("[aria-live]");
 
 afterEach(() => {
   act(() => showHuddle(null));
+  act(() => showSpeaking(new Set()));
   history.replaceState(null, "", "/");
   vi.unstubAllGlobals();
   Reflect.deleteProperty(navigator, "mediaDevices");
@@ -136,9 +139,9 @@ describe("The huddle bar", () => {
     expect(bar()).toHaveAccessibleName("Huddle");
   });
 
-  it("names a DM by the others in it", () => {
+  it("names a DM's by who it's with", () => {
     renderBar(huddle(), { id: "direct-1", kind: "direct", members: [ada, priya], activeAt: "2026-11-10T09:00:00.000Z" });
-    expect(bar()).toHaveAccessibleName("Huddle in Priya Patel");
+    expect(bar()).toHaveAccessibleName("Huddle with Priya Patel");
   });
 
   it("shows the first four faces, named as the directory has them now", () => {
@@ -154,6 +157,32 @@ describe("The huddle bar", () => {
     expect(faces.querySelectorAll("img")).toHaveLength(4);
     expect(faces).toHaveAttribute("aria-hidden", "true");
     expect(state()).toHaveTextContent("Samuel, Person, Person, and 2 others are in the huddle");
+  });
+
+  it("rings the face of whoever is speaking in green, over the faces beside it, but nobody's who is muted", () => {
+    renderBar(huddle({ people: [inHuddle(sam), inHuddle(priya, true), inHuddle(ada)] }));
+    const faces = () => [...screen.getByTitle("Sam Rivera, Priya Patel, Ada Lovelace").querySelectorAll("img")];
+    for (const face of faces()) expect(face).toHaveClass("ring-2", "ring-background");
+
+    act(() => showSpeaking(new Set(["sam", "priya"])));
+    const [first, second, third] = faces();
+    expect(first).toHaveClass("relative", "ring-2", "ring-positive");
+    expect(first).not.toHaveClass("ring-background");
+    // Whatever was heard of Priya as she muted.
+    expect(second).toHaveClass("ring-background");
+    expect(third).toHaveClass("ring-background");
+    // Its line says who's in the huddle still, and not who speaks, which would be read out each time.
+    expect(state()).toHaveTextContent("Sam, Priya, and you are in the huddle");
+
+    act(() => showSpeaking(new Set(["ada"])));
+    expect(faces().map((face) => face.classList.contains("ring-positive"))).toEqual([false, false, true]);
+  });
+
+  it("has no arrows beside its buttons, which choose among devices only in the huddle opened", () => {
+    renderBar();
+    expect(screen.queryByRole("button", { name: "Microphone and speaker" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Camera" })).not.toBeInTheDocument();
+    for (const name of ["Mute microphone", "Turn on camera"]) expect(screen.getByRole("button", { name })).not.toHaveClass("md:rounded-r-none");
   });
 });
 
